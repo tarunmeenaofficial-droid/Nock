@@ -1,0 +1,26 @@
+Nock
+
+The window title says Nock. This is not the old Stillframe file.
+
+1. Unzip Nock.zip into a new folder.
+2. Right-click Nock.bat, open Properties, and tick Unblock if you see it.
+3. Double-click Nock.bat. If Windows warns you, choose More info, then Run anyway.
+4. Closing the window hides it by the clock. Exit is on that icon.
+
+Use
+- Click a program, then press Ctrl+Y. That window minimizes and the desktop shows. The program is not closed.
+- Open Nock. Click the name, then Restore.
+- Ctrl+Shift+Y opens Nock.
+- Change shortcuts in Settings. A shortcut needs a modifier, such as Ctrl+Y.
+
+Copy and paste
+- Ctrl+C and Ctrl+V are the normal Windows clipboard. Nock does not take those keys.
+- Clipboard history is off until you turn it on in Settings.
+
+If a window will not come forward
+- Click it on the taskbar.
+- If the other program is running as admin, use Restart as admin on the Nock tray menu.
+
+What it cannot do
+- It minimizes for real. Some games and sites notice that and pause. Nock does not close them, and it does not inject into them.
+- Exclusive fullscreen may ignore minimize. Use a borderless window.
