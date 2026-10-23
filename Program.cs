@@ -21,11 +21,18 @@ namespace Nock
         public const int MOD_WIN = 0x0008;
         public const int MOD_NOREPEAT = 0x4000;
         public const int SW_MINIMIZE = 6;
+        public const int SW_FORCEMINIMIZE = 11;
+        public const int SW_SHOWNORMAL = 1;
         public const int SW_RESTORE = 9;
+        public const int WM_SYSCOMMAND = 0x0112;
+        public const int SC_MINIMIZE = 0xF020;
         public const int GWL_EXSTYLE = -20;
         public const int WS_EX_TOOLWINDOW = 0x00000080;
         public const int WS_EX_APPWINDOW = 0x00040000;
         public const uint GA_ROOT = 2;
+        public const uint GA_ROOTOWNER = 3;
+        public const uint GW_OWNER = 4;
+        public const uint SMTO_ABORTIFHUNG = 0x0002;
         public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
         public const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
         public const uint EVENT_OBJECT_DESTROY = 0x8001;
@@ -83,8 +90,14 @@ namespace Nock
         public static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr hmodWinEventProc, WinEventDelegate lpfnWinEventProc, uint idProcess, uint idThread, uint dwFlags);
         [DllImport("user32.dll")]
         public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+        public static extern IntPtr SendMessageTimeout(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+        [DllImport("user32.dll")]
+        public static extern void SwitchToThisWindow(IntPtr hwnd, bool altTab);
+        [DllImport("user32.dll")]
+        public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
         [DllImport("kernel32.dll")]
         public static extern uint GetCurrentProcessId();
         [DllImport("kernel32.dll")]
@@ -99,6 +112,8 @@ namespace Nock
         public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
         [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr SHGetFileInfo(string path, uint attr, ref SHFILEINFO info, uint cb, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
         [DllImport("user32.dll")]
         public static extern bool DestroyIcon(IntPtr handle);
 
@@ -158,19 +173,64 @@ namespace Nock
             }
         }
 
-        public static void RevealDesktop()
+        public static IntPtr RootOf(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return IntPtr.Zero;
+            IntPtr root = GetAncestor(hwnd, GA_ROOTOWNER);
+            if (root == IntPtr.Zero) root = GetAncestor(hwnd, GA_ROOT);
+            if (root == IntPtr.Zero) root = hwnd;
+            int guard = 0;
+            IntPtr owner = GetWindow(root, GW_OWNER);
+            while (owner != IntPtr.Zero && owner != root && guard < 8)
+            {
+                IntPtr next = GetAncestor(owner, GA_ROOTOWNER);
+                if (next == IntPtr.Zero || next == root) break;
+                root = next;
+                owner = GetWindow(root, GW_OWNER);
+                guard++;
+            }
+            string cls = ClassOf(root);
+            if (WindowPolicy.IsInnerSurface(cls))
+            {
+                IntPtr frame = FindWindow("ApplicationFrameWindow", TextOf(root));
+                if (frame != IntPtr.Zero) return frame;
+                IntPtr chrome = FindWindow("Chrome_WidgetWin_1", TextOf(root));
+                if (chrome != IntPtr.Zero) return chrome;
+            }
+            return root;
+        }
+
+        public static string MinimizeWindow(IntPtr hwnd)
+        {
+            if (!IsWindow(hwnd)) return "That window has already closed.";
+            ShowWindow(hwnd, SW_MINIMIZE);
+            if (IsIconic(hwnd)) return "";
+            ShowWindow(hwnd, SW_FORCEMINIMIZE);
+            if (IsIconic(hwnd)) return "";
+            IntPtr result;
+            SendMessageTimeout(hwnd, WM_SYSCOMMAND, (IntPtr)SC_MINIMIZE, IntPtr.Zero, SMTO_ABORTIFHUNG, 300, out result);
+            if (IsIconic(hwnd)) return "";
+            return "That window did not minimize on its own.";
+        }
+
+        public static bool RevealDesktop()
         {
             try
             {
                 Type shellType = Type.GetTypeFromProgID("Shell.Application");
                 object shell = Activator.CreateInstance(shellType);
-                shellType.InvokeMember("ToggleDesktop", BindingFlags.InvokeMethod, null, shell, new object[0]);
+                shellType.InvokeMember("MinimizeAll", BindingFlags.InvokeMethod, null, shell, new object[0]);
+                return true;
             }
-            catch { }
+            catch
+            {
+                return false;
+            }
         }
 
-        public static bool Activate(IntPtr hwnd)
+        public static string Activate(IntPtr hwnd)
         {
+            if (!IsWindow(hwnd)) return "That window has already closed.";
             AllowSetForegroundWindow(-1);
             uint thisThread = GetCurrentThreadId();
             uint forePid;
@@ -184,19 +244,41 @@ namespace Nock
                 if (foreThread != 0 && foreThread != thisThread) attachedFore = AttachThreadInput(thisThread, foreThread, true);
                 if (targetThread != 0 && targetThread != thisThread) attachedTarget = AttachThreadInput(thisThread, targetThread, true);
                 ShowWindow(hwnd, SW_RESTORE);
+                if (IsIconic(hwnd)) ShowWindow(hwnd, SW_SHOWNORMAL);
                 BringWindowToTop(hwnd);
-                return SetForegroundWindow(hwnd);
+                SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+                SetForegroundWindow(hwnd);
             }
             finally
             {
                 if (attachedTarget) AttachThreadInput(thisThread, targetThread, false);
                 if (attachedFore) AttachThreadInput(thisThread, foreThread, false);
             }
+            IntPtr now = GetForegroundWindow();
+            if (now == hwnd || GetAncestor(now, GA_ROOT) == hwnd || GetAncestor(now, GA_ROOTOWNER) == hwnd)
+                return "";
+            SwitchToThisWindow(hwnd, true);
+            now = GetForegroundWindow();
+            if (now == hwnd || GetAncestor(now, GA_ROOT) == hwnd) return "";
+            IntPtr probe = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, targetPid);
+            if (probe == IntPtr.Zero)
+                return "Windows blocked focus. The other program may be running as admin. Use Restart as admin on the Nock icon.";
+            CloseHandle(probe);
+            if (IsIconic(hwnd)) return "The window is still minimized. It may be hung, or it is not allowed to restore.";
+            return "The window was restored. Windows did not put it in front. Click it on the taskbar.";
         }
     }
 
     public static class WindowPolicy
     {
+        public static bool IsInnerSurface(string cls)
+        {
+            return cls == "Chrome_RenderWidgetHostHWND"
+                || cls == "Intermediate D3D Window"
+                || cls == "Windows.UI.Core.CoreWindow"
+                || cls == "ApplicationFrameInputSinkWindow";
+        }
+
         public static bool IsShell(string cls)
         {
             return cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd";
@@ -561,6 +643,8 @@ namespace Nock
             if (!Hotkey.TryParse("Ctrl+Y", out hotkey) || !hotkey.Ctrl || hotkey.Alt || hotkey.Shift || hotkey.Win || hotkey.Vk != 0x59) failed++;
             if (!Hotkey.TryParse("Ctrl+Shift+F5", out hotkey) || !hotkey.Ctrl || !hotkey.Shift || hotkey.Vk != 0x74) failed++;
             if (Hotkey.TryParse("Y", out hotkey)) failed++;
+            if (WindowPolicy.IsInnerSurface("Chrome_RenderWidgetHostHWND") == false) failed++;
+            if (WindowPolicy.IsInnerSurface("Chrome_WidgetWin_1")) failed++;
             if (!WindowPolicy.Keep("Chrome_WidgetWin_1", "Mail", 10, 2, false, false)) failed++;
             if (WindowPolicy.Keep("Progman", "Desktop", 10, 2, false, false)) failed++;
             if (WindowPolicy.Keep("Notepad", "   ", 10, 2, false, false)) failed++;
@@ -779,7 +863,11 @@ namespace Nock
                     status.Text = "Ctrl+Y was already in use. The shortcut is now " + alt.ToString() + ".";
                     DiagnosticsService.Log("hotkey moved to " + alt.ToString());
                 }
-                else status.Text = "Could not register a minimize shortcut. Change it in Settings.";
+                else
+                {
+                    status.Text = "Could not register a minimize shortcut. Change it in Settings.";
+                    try { tray.ShowBalloonTip(3000, "Nock", status.Text, ToolTipIcon.Warning); } catch { }
+                }
             }
             Hotkey dash;
             if (!Hotkey.TryParse(settings.DashboardHotkey, out dash))
@@ -791,6 +879,7 @@ namespace Nock
             if (!Native.RegisterHotKey(Handle, HOTKEY_DASHBOARD, dash.Modifiers(), dash.Vk))
             {
                 status.Text = "Open Nock from the icon by the clock. The dashboard shortcut is in use.";
+                try { tray.ShowBalloonTip(3000, "Nock", status.Text, ToolTipIcon.Warning); } catch { }
             }
             else settings.DashboardHotkey = dash.ToString();
         }
@@ -812,30 +901,34 @@ namespace Nock
 
         void MinimizeActive()
         {
-            IntPtr hwnd = Native.GetAncestor(Native.GetForegroundWindow(), Native.GA_ROOT);
-            if (hwnd == IntPtr.Zero) hwnd = Native.GetForegroundWindow();
-            if (hwnd == Handle)
+            IntPtr raw = Native.GetForegroundWindow();
+            IntPtr hwnd = Native.RootOf(raw);
+            if (hwnd == Handle || raw == Handle)
             {
                 status.Text = "Nock stays open.";
                 return;
             }
-            if (!Eligible(hwnd))
+            string cls = Native.ClassOf(hwnd);
+            if (WindowPolicy.IsShell(cls))
             {
-                status.Text = "That window cannot be minimized from here.";
-                DiagnosticsService.Log("skip ineligible window");
+                status.Text = "Already on the desktop.";
                 return;
             }
-            bool ok = Native.ShowWindow(hwnd, Native.SW_MINIMIZE);
-            if (!ok && !Native.IsIconic(hwnd))
+            string why = Native.MinimizeWindow(hwnd);
+            if (Native.IsWindow(hwnd) && Native.TextOf(hwnd).Trim().Length > 0) Remember(hwnd, true);
+            bool left = Native.RevealDesktop();
+            if (left)
             {
-                status.Text = "Windows did not minimize that window.";
-                DiagnosticsService.Log("minimize failed");
-                return;
+                status.Text = "Left the program. It is still running. Open Nock and click Restore.";
+                DiagnosticsService.Log("left " + Native.TextOf(hwnd) + " " + why);
             }
-            Remember(hwnd, true);
-            Native.RevealDesktop();
-            status.Text = "Minimized. The program is still running. Open Nock and click Restore.";
-            DiagnosticsService.Log("minimized " + Native.TextOf(hwnd));
+            else
+            {
+                string msg = why.Length > 0 ? why : "Could not leave that program.";
+                status.Text = msg;
+                DiagnosticsService.Log(msg + " class=" + cls);
+                try { tray.ShowBalloonTip(3000, "Nock", msg, ToolTipIcon.Warning); } catch { }
+            }
             Fill();
         }
 
@@ -843,7 +936,7 @@ namespace Nock
         {
             if (!Native.IsWindow(hwnd)) return false;
             if (!Native.IsWindowVisible(hwnd) && !Native.IsIconic(hwnd)) return false;
-            if (Native.Cloaked(hwnd)) return false;
+            if (Native.Cloaked(hwnd) && !Native.IsIconic(hwnd)) return false;
             long ex = Native.ExStyle(hwnd);
             bool toolOnly = (ex & Native.WS_EX_TOOLWINDOW) != 0 && (ex & Native.WS_EX_APPWINDOW) == 0;
             uint pid;
@@ -940,6 +1033,24 @@ namespace Nock
             }
         }
 
+        IntPtr FindReplacement(TrackedWindow row)
+        {
+            if (row == null) return IntPtr.Zero;
+            IntPtr found = IntPtr.Zero;
+            Native.EnumProc callback = delegate (IntPtr candidate, IntPtr lp)
+            {
+                uint pid;
+                Native.GetWindowThreadProcessId(candidate, out pid);
+                if (pid != row.Pid) return true;
+                IntPtr root = Native.RootOf(candidate);
+                if (Native.TextOf(root) != row.Title) return true;
+                found = root;
+                return false;
+            };
+            Native.EnumWindows(callback, IntPtr.Zero);
+            return found;
+        }
+
         void RestoreSelected()
         {
             if (list.SelectedItems.Count == 0) return;
@@ -948,21 +1059,29 @@ namespace Nock
             TrackedWindow row = registry.Find(hwnd);
             if (!Native.IsWindow(hwnd))
             {
-                if (row != null) registry.Remove(hwnd);
-                Fill();
-                status.Text = "That window has already closed.";
-                return;
+                IntPtr again = FindReplacement(row);
+                if (again == IntPtr.Zero)
+                {
+                    if (row != null) registry.Remove(hwnd);
+                    Fill();
+                    status.Text = "That window has already closed.";
+                    try { tray.ShowBalloonTip(2500, "Nock", status.Text, ToolTipIcon.Warning); } catch { }
+                    return;
+                }
+                hwnd = again;
+                if (row != null) row.Hwnd = hwnd;
             }
-            bool focused = Native.Activate(hwnd);
+            string problem = Native.Activate(hwnd);
             if (row != null)
             {
                 row.Minimized = Native.IsIconic(hwnd);
                 row.LastActive = DateTime.Now;
             }
-            if (!focused)
+            if (problem.Length > 0)
             {
-                status.Text = "The window was restored. Windows did not let Nock focus it. Click it on the taskbar if it is not in front.";
-                DiagnosticsService.Log("foreground restricted");
+                status.Text = problem;
+                DiagnosticsService.Log(problem);
+                try { tray.ShowBalloonTip(3000, "Nock", problem, ToolTipIcon.Warning); } catch { }
             }
             else
             {
@@ -980,7 +1099,7 @@ namespace Nock
             {
                 BeginInvoke((MethodInvoker)delegate
                 {
-                    IntPtr root = Native.GetAncestor(hwnd, Native.GA_ROOT);
+                    IntPtr root = Native.RootOf(hwnd);
                     if (root == IntPtr.Zero) root = hwnd;
                     if (type == Native.EVENT_OBJECT_DESTROY)
                     {
